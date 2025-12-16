@@ -2,8 +2,14 @@ import numpy as np
 import pandapower as pp
 import pandapower.networks as pn
 
-def load_ieee14():
-    net = pn.case14()
+def load_test_case(case="case14"):
+    if case == "case14":
+        net = pn.case14()
+    elif case == "case9":
+        net = pn.case9()
+    else:
+        raise ValueError(f"Unknown test case: {case}")
+
     pp.runpp(net, algorithm="nr", init="dc", calculate_voltage_angles=True)
     return net
 
