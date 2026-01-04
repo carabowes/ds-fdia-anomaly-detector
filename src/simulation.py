@@ -83,9 +83,9 @@ def build_dc_measurement_model(net):
     H = np.vstack(rows)
     z_true = np.array(z_true_list)
 
-    print("H shape =", H.shape)
-    print("x_true shape =", x_true.shape)
-    print("z_true shape =", z_true.shape)
+    # print("H shape =", H.shape)
+    # print("x_true shape =", x_true.shape)
+    # print("z_true shape =", z_true.shape)
 
     return H, x_true, z_true, mask
 
