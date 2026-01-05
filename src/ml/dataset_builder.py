@@ -2,6 +2,10 @@ import numpy as np
 from src.ml.windowing import generate_sliding_windows
 from src.state_estimation import run_wls_time_series
 
+# NOTE:
+# This module contains early prototype dataset builders used during exploratory experimentation.
+# Current pipeline-based dataset construction operates on exported runs.
+
 # Baseline A: Raw Measurement Windows 
 def build_raw_window_dataset(
     Z: np.ndarray,

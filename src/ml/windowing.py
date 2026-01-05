@@ -1,11 +1,12 @@
 import numpy as np
+from typing import Literal, Tuple, Dict, Any
 
 def generate_sliding_windows(
         Z: np.ndarray,
         window_size: int,
         convergence_mask: np.ndarray | None = None,
         stride: int = 1,
-):
+) -> Tuple[np.ndarray, Dict[str, Any]]:
     # Basic input validation
     if window_size <= 0:
         raise ValueError("window_size must be positive.")
