@@ -41,16 +41,15 @@ class IsolationForestDetector(BaseAnomalyDetector):
 
         # Pre-compute threshold using training scores
         train_scores = self.score(X)
-        self._tau = self.threshold(train_scores)
+        self._tau = np.percentile(train_scores, self.threshold_quantile) #self.threshold(train_scores)
         self._is_fitted = True
 
     def score(self, X: np.ndarray) -> np.ndarray:
         # compute continuous anomaly scores, higher values - more anomalous
         if X.ndim != 2:
             raise ValueError("X must be a 2D array of shape (n_windows, n_features)")
-        
-        scores = -self.model.decision_function(X)
-        return scores
+
+        return -self.model.score_samples(X)
     
     def threshold(self, scores: np.ndarray) -> float:
         # Compute anomaly decision threshold t using a fixed quantile
@@ -58,7 +57,7 @@ class IsolationForestDetector(BaseAnomalyDetector):
             raise ValueError("scores must be a 1D array")
         
         if self._tau is None:
-            self._tau = float(np.percentile(scores, self.threshold_quantile))
+            raise RuntimeError("Detector must be fitted before thresholding")
         
         return self._tau
         
