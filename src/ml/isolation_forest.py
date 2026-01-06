@@ -2,6 +2,9 @@ from sklearn.ensemble import IsolationForest
 import numpy as np
 from typing import Tuple, Dict 
 
+# NOTE
+# early implementation - replaced by ml/detectors/if.py
+
 def train_isolation_forest(
     X_train: np.ndarray,
     random_state: int = 42,

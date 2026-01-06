@@ -1,6 +1,6 @@
 import numpy as np
 from src.ml.windowing import generate_sliding_windows
-from src.state_estimation import run_wls_time_series
+from src.pipeline.state_estimation import run_wls_time_series
 
 # NOTE:
 # This module contains early prototype dataset builders used during exploratory experimentation.

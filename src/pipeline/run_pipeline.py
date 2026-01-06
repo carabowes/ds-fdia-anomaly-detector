@@ -4,8 +4,8 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional
 
-from src.time_series import run_time_series, inject_fdi_time_series
-from src.state_estimation import run_wls_time_series
+from src.pipeline.time_series import run_time_series, inject_fdi_time_series
+from src.pipeline.state_estimation import run_wls_time_series
 
 ScenarioType = Literal["standard", "random", "stealth"]
 

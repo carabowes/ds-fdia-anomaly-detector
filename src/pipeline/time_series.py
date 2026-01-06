@@ -1,7 +1,7 @@
 import numpy as np
 import pandapower as pp
-from src.simulation import build_dc_measurement_model, simulate_measurements
-from src.attacks import stealth_FDIA, random_attack, standard_FDIA
+from src.pipeline.simulation import build_dc_measurement_model, simulate_measurements
+from src.pipeline.attacks import stealth_FDIA, random_attack, standard_FDIA
 
 def run_time_series(
     net, #pandapower network
