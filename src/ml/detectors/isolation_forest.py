@@ -1,4 +1,5 @@
 from __future__ import annotations
+from typing import Optional
 
 import numpy as np
 from sklearn.ensemble import IsolationForest as SklearnIsolationForest
@@ -29,7 +30,7 @@ class IsolationForestDetector(BaseAnomalyDetector):
             random_state=random_state,
         )
         self.threshold_quantile = threshold_quantile
-        self._tau: float | None = None
+        self._tau: Optional[float] = None
     
     def fit(self, X: np.ndarray) -> None:
         # Fit IF on windowed feature matrix

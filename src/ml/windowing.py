@@ -1,10 +1,10 @@
 import numpy as np
-from typing import Literal, Tuple, Dict, Any
+from typing import Literal, Optional, Tuple, Dict, Any
 
 def generate_sliding_windows(
         Z: np.ndarray,
         window_size: int,
-        convergence_mask: np.ndarray | None = None,
+        convergence_mask: Optional[np.ndarray] = None,
         stride: int = 1,
 ) -> Tuple[np.ndarray, Dict[str, Any]]:
     # Basic input validation

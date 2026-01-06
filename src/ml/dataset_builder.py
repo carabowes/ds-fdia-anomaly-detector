@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Optional
 from src.ml.windowing import generate_sliding_windows
 from src.pipeline.state_estimation import run_wls_time_series
 
@@ -10,7 +11,7 @@ from src.pipeline.state_estimation import run_wls_time_series
 def build_raw_window_dataset(
     Z: np.ndarray,
     window_size: int,
-    convergence_mask: np.ndarray | None = None,
+    convergence_mask: Optional[np.ndarray] = None,
     stride: int = 1,
 ):
     # Build sliding window dataset from raw measurements Z
@@ -37,7 +38,7 @@ def build_residual_window_dataset(
     H: np.ndarray,
     sigma: float,
     window_size: int,
-    convergence_mask: np.ndarray | None = None,
+    convergence_mask: Optional[np.ndarray] = None,
     stride: int = 1,
 ):
     # Build sliding window dataset from WLS residuals
