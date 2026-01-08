@@ -67,3 +67,15 @@ def build_windowed_dataset(
     )
 
     return X, window_metadata, attack_mask
+
+def compute_clean_window_mask(
+    attack_mask: np.ndarray,
+    window_starts: np.ndarray,
+    window_size: int,
+) -> np.ndarray:
+    clean_mask = np.zeros(len(window_starts), dtype=int)
+
+    for i, s in enumerate(window_starts):
+        if attack_mask[s : s + window_size].sum() == 0:
+            clean_mask[i] = 1  # clean
+    return clean_mask

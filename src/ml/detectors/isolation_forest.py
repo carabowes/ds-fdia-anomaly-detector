@@ -26,24 +26,45 @@ class IsolationForestDetector(BaseAnomalyDetector):
 
         self.model = SklearnIsolationForest(
             n_estimators=n_estimators,
-            contamination=contamination,
+            contamination="auto",
             random_state=random_state,
         )
         self.threshold_quantile = threshold_quantile
         self._tau: Optional[float] = None
     
-    def fit(self, X: np.ndarray) -> None:
+    def fit(self, X: np.ndarray, clean_mask: Optional[np.ndarray] = None) -> None:
         # Fit IF on windowed feature matrix
 
-        if X.ndim != 2:
-            raise ValueError("X must be a 2D array of shape (n_windows, n_features)")
+        # if X.ndim != 2:
+        #     raise ValueError("X must be a 2D array of shape (n_windows, n_features)")
         
-        self.model.fit(X)
+        # self.model.fit(X)
+        # scores = self.score(X)
+        # # Pre-compute threshold using training scores
+        # if clean_mask is not None:
+        #     scores = scores[clean_mask == 1]
+        # # train_scores = self.score(X)
+        # self._tau = np.percentile(scores, self.threshold_quantile) #self.threshold(train_scores)
+        # self._is_fitted = True
 
-        # Pre-compute threshold using training scores
-        train_scores = self.score(X)
-        self._tau = np.percentile(train_scores, self.threshold_quantile) #self.threshold(train_scores)
+        if clean_mask is not None:
+            X_fit = X[clean_mask==1]
+        else:
+            X_fit = X
+        
+        self.model.fit(X_fit)
+
+        scores = self.score(X_fit)
+        self._tau = np.percentile(scores, self.threshold_quantile) #self.threshold(train_scores)
         self._is_fitted = True
+
+        print(
+            "DEBUG:",
+            "clean_mask provided =", clean_mask is not None,
+            "num_clean =", None if clean_mask is None else int(clean_mask.sum()),
+            "num_windows =", X.shape[0],
+        )
+
 
     def score(self, X: np.ndarray) -> np.ndarray:
         # compute continuous anomaly scores, higher values - more anomalous
