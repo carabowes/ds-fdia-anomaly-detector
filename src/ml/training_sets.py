@@ -1,5 +1,8 @@
 import numpy as np
 
+#Defines logic for identifying clean versus contaminated windows and supports semi-supervised training assumptions 
+#where only attack-free data is used to fit anomaly detectors.
+
 def build_normal_training_set(X_all, window_metadata, window_size, attack_mask):
     """
     Select normal windows from a pre-built window dataset.

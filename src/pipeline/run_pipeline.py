@@ -7,6 +7,16 @@ from typing import Any, Dict, Literal, Optional
 from src.pipeline.time_series import run_time_series, inject_fdi_time_series
 from src.pipeline.state_estimation import run_wls_time_series
 
+"""
+Authoritative implementation of the FDIA simulation pipeline.
+
+Defines the single, reproducible execution flow for the system:
+simulation → FDIA injection → state estimation → residual computation → outputs.
+
+This module coordinates all pipeline stages and enforces deterministic behaviour
+given fixed configuration and random seed.
+"""
+
 ScenarioType = Literal["standard", "random", "stealth"]
 
 @dataclass(frozen=True)

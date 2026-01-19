@@ -8,6 +8,14 @@ import numpy as np
 import pandas as pd
 from src.pipeline.run_pipeline import PipelineOutputs
 
+"""
+Export utilities for pipeline runs.
+
+Writes all relevant timestep-level pipeline outputs (measurements, residuals,
+attack masks, convergence flags, and metadata) to disk in a structured,
+reproducible format.
+"""
+
 def export_pipeline_run(
     outputs: PipelineOutputs,
     out_dir: Path,

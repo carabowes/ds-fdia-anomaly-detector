@@ -5,15 +5,25 @@ import numpy as np
 
 from src.io.load_pipeline_run import load_pipeline_run
 from src.ml.windowing import generate_sliding_windows
+from src.features.innovations import compute_innovations
+
+"""
+Windowed dataset construction for anomaly detection.
+
+Transforms timestep-level signals into fixed-size sliding windows suitable for machine learning. 
+Supports multiple representations (residuals, measurements, innovations) and preserves alignment with ground-truth
+attack timelines via window metadata.
+"""
 
 #Feature representation to window: residuals - residual_norm signal, measurements - raw measurement vectors Z
-RepresentationType = Literal["residuals", "measurements"] 
+RepresentationType = Literal["residuals", "measurements", "innovations"] 
 
 def build_windowed_dataset(
         run_dir: Path, # Path to a single pipeline run directory
         window_size: int, #Length of each sliding window (no of timesteps)
         stride: int, #Step size between consecutive windows
         representation: RepresentationType = "residuals", 
+        innovation_alpha: float=0.3,
 ) -> Tuple[np.ndarray, Dict[str, Any], np.ndarray]:
     
     """
@@ -35,9 +45,16 @@ def build_windowed_dataset(
         feature_dim = 1
     
     elif representation == "measurements":
-        # raw measurements -> drop time column
+        # raw measurements -> drop time coloumn
         Z = data["measurements"].drop(columns=["t"]).values
         feature_dim = Z.shape[1]
+    
+    elif representation == "innovations":
+        # raw measurements -> drop time column
+        Z_raw = data["measurements"].drop(columns=["t"]).values
+        Z = compute_innovations(Z_raw, alpha=innovation_alpha)
+        feature_dim = Z.shape[1]
+    
     else:
         raise ValueError(f"Unsupported representation: {representation}")
     

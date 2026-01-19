@@ -2,6 +2,13 @@ import numpy as np
 import pandapower as pp
 import pandapower.networks as pn
 
+"""
+Time-series power-system simulation utilities.
+
+Implements load perturbations, power-flow execution, and measurement generation over time for the IEEE test networks. 
+Provides the physical dynamics that drive the FDIA experiments.
+"""
+
 def load_test_case(case="case14"):
     if case == "case14":
         net = pn.case14()

@@ -2,6 +2,14 @@ from __future__ import annotations
 import numpy as np
 from typing import Sequence
 
+"""
+Projection of window-level alarms to timestep-level signals.
+
+Implements a deterministic mapping from window-based anomaly decisions
+to timestep-level alarm signals, enabling meaningful temporal evaluation
+against ground-truth attack labels.
+"""
+
 def window_alarms_to_timesteps(
     window_alarms: np.ndarray,
     start_indices: Sequence[int],

@@ -1,6 +1,14 @@
 import numpy as np
 from typing import Literal, Optional, Tuple, Dict, Any
 
+"""
+Low-level sliding window utilities.
+
+Provides generic functions for constructing overlapping sliding windows
+from time-series data. This module contains no detection or domain-specific
+logic.
+"""
+
 def generate_sliding_windows(
         Z: np.ndarray,
         window_size: int,

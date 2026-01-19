@@ -1,5 +1,13 @@
 import numpy as np
 
+"""
+Temporal innovation feature computation.
+
+Defines deterministic functions for computing temporal innovations on multivariate measurement vectors,
+introducing time-dependent structure designed to expose stealth FDIA behaviour.
+"""
+
+
 def compute_innovations(Z: np.ndarray, alpha: float = 0.3) -> np.ndarray:
     
     # Compute Expontential Moving Average (EMA)-based one-step prediction innovations for multivariate signals.
