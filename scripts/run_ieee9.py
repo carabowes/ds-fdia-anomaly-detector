@@ -58,6 +58,7 @@ def main():
         Path("runs")
         / "ieee9"
         / scenario_config.attack_type
+        / f"T_{pipeline_config.T}"
         / f"seed_{pipeline_config.seed}"
     )
     export_pipeline_run(outputs, run_dir)
