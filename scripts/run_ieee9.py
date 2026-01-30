@@ -8,6 +8,8 @@ import numpy as np
 from pathlib import Path
 import secrets
 from src.io.export_pipeline_run import export_pipeline_run
+from src.ml.mitigation_metrics import compute_false_incident_rate, extract_alarm_segments, evaluate_episode_detection, summarise_episode_detection
+
 
 def build_ieee9_network():
     # Build and return the IEEE 9-bus test network
@@ -114,12 +116,7 @@ def main():
         print(f"[INFO] Using provided episode_seed = {episode_seed}")
 
     episode_rng = np.random.default_rng(episode_seed)
-    # scenario_config = ScenarioConfig(
-    #     attack_type=args.scenario,
-    #     start=args.attack_start,
-    #     end=args.attack_end,
-    # )
-    # episodes = parse_episodes(args.episodes)
+
     episodes = None
     if args.attack_schedule == "random":
         # episode_rng = np.random.default_rng(episode_seed)
@@ -184,7 +181,7 @@ def main():
     print(f"Attacked steps  : {int(outputs.attack_mask.sum())}")
     print(f"Converged steps : {int(outputs.converged.sum())}")
     print("===================================\n")
-
+    
 if __name__ == "__main__":
     print("Running IEEE-9 pipeline...")
     main()

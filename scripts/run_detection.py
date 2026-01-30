@@ -10,6 +10,7 @@ from src.ml.alarm_projection import window_alarms_to_timesteps
 from src.io.load_pipeline_run import load_pipeline_run
 from src.ml.evaluation import evaluate_timestep_detection
 from src.datasets.windowed_dataset import compute_clean_window_mask
+from src.ml.mitigation_metrics import compute_false_incident_rate, extract_alarm_segments, evaluate_episode_detection, summarise_episode_detection
 
 """
 Entry point for anomaly detection and evaluation on exported pipeline runs.
@@ -109,6 +110,18 @@ def main():
         / f"T_{args.T}"
         / f"seed_{args.seed}"
         )
+
+    # Load attack episodes from the pipeline run
+    run = load_pipeline_run(RUN_DIR)
+    print(run.keys())
+    for k,v in run.items():
+        try:
+            print(k, v.shape)
+        except:
+            print(k, type(v))
+    attack_episodes = run["metadata"]["attack_episodes"]
+    episode_intervals = [(ep["start"], ep["end"]) for ep in attack_episodes]
+    
     # WINDOW_SIZE = 10
     STRIDE = 1
     # CALIBRATION_T = 100
@@ -204,6 +217,22 @@ def main():
                             attack_mask=attack_mask,
                             timestep_alarms=timestep_alarms,
                         )
+                            # --- Mitigation-level metrics (incident / episode based) ---
+
+                            alarm_segments = extract_alarm_segments(timestep_alarms)
+
+                            false_incident_metrics = compute_false_incident_rate(
+                                alarm_segments=alarm_segments,
+                                attack_episodes=episode_intervals,
+                                T=T,
+                            )
+
+                            episode_results = evaluate_episode_detection(
+                                alarm_segments=alarm_segments,
+                                attack_episodes=episode_intervals,
+                            )
+
+                            episode_summary = summarise_episode_detection(episode_results)
                             # train_mask = robust_trim_mask(X, train_base, detector, TRIM_FRACTION) if LIVE_MODE else train_base
                             # detector.fit(X, clean_mask=train_mask.astype(int))
                             
@@ -234,6 +263,10 @@ def main():
                                 "window_size": window_size,
                                 "threshold_q": q,
                                 "alpha": alpha if rep == "innovations" else None,
+                                "false_incidents_per_500": false_incident_metrics["false_incidents_per_500"],
+                                "num_false_incidents": false_incident_metrics["false_incidents"],
+                                "episode_detection_rate": episode_summary["detection_rate"],
+                                "median_ttfd": episode_summary["median_ttfd"],
                                 **metrics,
                             }
                             results.append(result)
@@ -275,6 +308,22 @@ def main():
                                 attack_mask=attack_mask,
                                 timestep_alarms=timestep_alarms,
                         )
+                                # --- Mitigation-level metrics (incident / episode based) ---
+
+                                alarm_segments = extract_alarm_segments(timestep_alarms)
+
+                                false_incident_metrics = compute_false_incident_rate(
+                                    alarm_segments=alarm_segments,
+                                    attack_episodes=episode_intervals,
+                                    T=T,
+                                )
+
+                                episode_results = evaluate_episode_detection(
+                                    alarm_segments=alarm_segments,
+                                    attack_episodes=episode_intervals,
+                                )
+
+                                episode_summary = summarise_episode_detection(episode_results)
 
                             #     train_mask = robust_trim_mask(X, train_base, detector, TRIM_FRACTION) if LIVE_MODE else train_base
                             #     detector.fit(X, clean_mask=train_mask.astype(int))
@@ -302,20 +351,62 @@ def main():
                                     "nu": nu,
                                     "gamma": gamma,
                                     "alpha": alpha if rep == "innovations" else None,
+                                    "false_incidents_per_500": false_incident_metrics["false_incidents_per_500"],
+                                    "num_false_incidents": false_incident_metrics["false_incidents"],
+                                    "episode_detection_rate": episode_summary["detection_rate"],
+                                    "median_ttfd": episode_summary["median_ttfd"],
                                     **metrics,
                                 }
                                 results.append(result)
-                                if best_result is None:
+
+                                is_better = (
+                                    best_result is None
+                                    or result["f1"] > best_result["f1"]
+                                    or (
+                                        result["f1"] == best_result["f1"]
+                                        and result["false_incidents_per_500"] < best_result["false_incidents_per_500"]
+                                    )
+                                )
+
+                                if is_better:
+                                    print(
+                                        f"[MITIGATION BEST] "
+                                        f"false_incidents={false_incident_metrics['false_incidents']}, "
+                                        f"per500={false_incident_metrics['false_incidents_per_500']:.2f}, "
+                                        f"episode_detection_rate={episode_summary['detection_rate']:.2f}, "
+                                        f"median_ttfd={episode_summary['median_ttfd']}"
+                                    )
                                     best_result = result
-                                else:
-                                    if (
-                                        result["f1"] > best_result["f1"]
-                                        or (
-                                            result["f1"] == best_result["f1"]
-                                            and result["FPR"] < best_result["FPR"]
-                                        )
-                                    ):
-                                        best_result = result
+                                
+    #                             results.append(result)
+    #                             if best_result is None:
+    #                                 best_result = result
+    #                             else:
+    #                                 if (
+    #                                     result["f1"] > best_result["f1"]
+    #                                     or (
+    #                                         result["f1"] == best_result["f1"]
+    #                                         and result["FPR"] < best_result["FPR"]
+    #                                     )
+    #                                 ):
+    #                                     best_result = result
+    #                             is_better = (
+    #                                 best_result is None
+    #                                 or result["f1"] > best_result["f1"]
+    #                                 or (
+    #                                     result["f1"] == best_result["f1"]
+    #                                     and result["false_incidents_per_500"] < best_result["false_incidents_per_500"]
+    #                                 )
+    #                             )
+
+    #                             if is_better:
+    #                                 print(
+    #                                     f"[MITIGATION BEST] "
+    #                                     f"false_incidents={false_incident_metrics['false_incidents']}, "
+    #                                     f"per500={false_incident_metrics['false_incidents_per_500']:.2f}, "
+    #                                     f"episode_detection_rate={episode_summary['detection_rate']:.2f}, "
+    #                                     f"median_ttfd={episode_summary['median_ttfd']}"
+    # )         
 
                 elif detector_name == "lof":
                     for n_neighbors in lof_neighbors_grid:
@@ -339,6 +430,22 @@ def main():
                             attack_mask=attack_mask,
                             timestep_alarms=timestep_alarms,
                         )
+                        # --- Mitigation-level metrics (incident / episode based) ---
+
+                            alarm_segments = extract_alarm_segments(timestep_alarms)
+
+                            false_incident_metrics = compute_false_incident_rate(
+                                alarm_segments=alarm_segments,
+                                attack_episodes=episode_intervals,
+                                T=T,
+                            )
+
+                            episode_results = evaluate_episode_detection(
+                                alarm_segments=alarm_segments,
+                                attack_episodes=episode_intervals,
+                            )
+
+                            episode_summary = summarise_episode_detection(episode_results)
                         #     train_mask = robust_trim_mask(X, train_base, detector, TRIM_FRACTION) if LIVE_MODE else train_base
                         #     detector.fit(X, clean_mask=train_mask.astype(int))
                             
@@ -366,6 +473,10 @@ def main():
                                 "threshold_q": q,
                                 "n_neighbors": n_neighbors,
                                 "alpha": alpha if rep == "innovations" else None,
+                                "false_incidents_per_500": false_incident_metrics["false_incidents_per_500"],
+                                "num_false_incidents": false_incident_metrics["false_incidents"],
+                                "episode_detection_rate": episode_summary["detection_rate"],
+                                "median_ttfd": episode_summary["median_ttfd"],
                                 **metrics,
                             }
 

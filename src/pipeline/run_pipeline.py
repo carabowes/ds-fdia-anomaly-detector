@@ -124,13 +124,14 @@ def run_pipeline(
         strength_max=scenario.strength_max,
 
     )
+
     # 3. State Estimation + residual signal (norms)
     residual_norms, X_hat = run_wls_time_series(
         Z=Z_attacked,
         H=H,
         sigma=config.sigma,
     )
-
+    
     # 4. Outputs
     time = np.arange(Z_clean.shape[0], dtype=int)
 

@@ -22,6 +22,7 @@ def generate_random_attack(
     - Deterministic given rng.
     """
 
+     # Defensive checks — fail fast on invalid configuration
     if T <= 0:
         return []
 
@@ -35,39 +36,29 @@ def generate_random_attack(
         no_attack_before = 0
 
     episodes: List[Episode] = []
-    t = int(no_attack_before)
+    t = int(no_attack_before) #  Start time pointer at the commissioning boundary
+    # Track end of most recent episode
+    # Initialised to -cooldown so that an attack CAN start at t = no_attack_before
     last_end = -int(cooldown)
 
     while t < T:
+        # Check whether cooldown has fully elapsed
+        # This prevents back-to-back attacks that unrealistically overlap
         can_start = (t - last_end) >= cooldown
 
         if can_start and rng.random() < p_start:
-            duration = int(rng.integers(duration_min, duration_max + 1))
+            duration = int(rng.integers(duration_min, duration_max + 1))  # Sample attack duration
             start = t
-            end = min(t + duration, T)
-            episodes.append((start, end))
+            end = min(t + duration, T)  # ensure episode stays within horizon
+            # record episode
+            episodes.append({
+                "start": start,
+                "end": end,
+            })
+             # Update last_end so cooldown is enforced
             last_end = end
-            t = end  # jump past attack
+            t = end  # jump past attack - (prevents nested or overlapping episodes)
         else:
             t += 1
 
     return episodes
-
-    # episodes: List[Tuple[int, int]] = []
-    # t = max(no_attack_before, 0)
-    # last_end = -cooldown
-    # while t < T:
-    #     can_start = (t - last_end) >= cooldown
-
-    #     if can_start and rng.random() < p_start:
-    #         duration = int(rng.integers(duration_min, duration_max + 1))
-    #         start = t
-    #         end = min(t + duration, T)
-
-    #         episodes.append((start, end))
-    #         last_end = end
-    #         t = end  # jump past attack
-    #     else:
-    #         t += 1
-
-    # return episodes
