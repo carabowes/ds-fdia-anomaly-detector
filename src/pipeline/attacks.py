@@ -16,7 +16,8 @@ def random_attack(z, attacked_indices, rng, scale):
     z_attack[attacked_indices] += rng.normal(0.0, scale, size=len(attacked_indices))
     return z_attack
 
-def stealth_FDIA(H, attacked_indices, alpha, rng):
+# def stealth_FDIA(H: np.ndarray, z_clean: np.ndarray, attacked_indices: np.ndarray, percent: float, rng: np.random.Generator,):
+def stealth_FDIA(H: np.ndarray, z_clean: np.ndarray, attacked_indices: np.ndarray, percent: float, c_direction: np.ndarray,):
     """
     Stealth attack: construct a = H c so that residual tests are (nearly) blind.
 
@@ -24,16 +25,69 @@ def stealth_FDIA(H, attacked_indices, alpha, rng):
     a_full = H c: attack in measurement space.
     We then apply it only on attacked_indices.
     """
-    n = H.shape[1]
 
-    # Random direction in state space
-    c = rng.standard_normal(n)
-    c = c / np.linalg.norm(c)
-    c = alpha * c
-
-    a_full = H @ c
+    a_full = H @ c_direction
 
     a = np.zeros_like(a_full)
-    a[attacked_indices] = a_full[attacked_indices]
+
+    for idx in attacked_indices:
+        base_mag = abs(z_clean[idx]) + 1e-6
+        target_mag = percent * base_mag
+
+        if abs(a_full[idx]) > 1e-8:
+            scale = target_mag / abs(a_full[idx])
+            a[idx] = a_full[idx] * scale
+        else:
+            a[idx] = 0.0
 
     return a
+
+    # n = H.shape[1]
+
+    # #1) random direction in state space
+    # c = rng.standard_normal(n)
+    # c = c / np.linalg.norm(c)
+    # a_full = H @ c
+
+    # #2) Scale relative to measurement magnitude (10-15%)
+    # a = np.zeros_like(a_full)
+    # for idx in attacked_indices:
+    #     base_mag = abs(z_clean[idx]) + 1e-6  # avoid zero scaling
+    #     target_mag = percent * base_mag
+
+    #     # scale stealth vector entry to bounded magnitude
+    #     if abs(a_full[idx]) > 1e-8:
+    #         scale = target_mag / abs(a_full[idx])
+    #         a[idx] = a_full[idx] * scale
+    #     else:
+    #         a[idx] = 0.0
+
+    # return a
+
+    # n = H.shape[1]
+
+    # # Random direction in state space
+    # c = rng.standard_normal(n)
+    # c = c / np.linalg.norm(c)
+    # c = alpha * c
+
+    # a_full = H @ c
+
+    # a = np.zeros_like(a_full)
+    # a[attacked_indices] = a_full[attacked_indices]
+
+    # return a
+
+def raised_cosine_envelope(t: int, start: int, end: int) -> float:
+    """
+    Smooth envelope in [0,1] over the interval [start, end).
+    - 0 at start
+    - 1 around the middle
+    - 0 at end (exclusive)
+    """
+    if t < start or t >= end:
+        return 0.0
+    # map t in [start, end) to phase in [0, pi]
+    phase = np.pi * (t - start) / max(1, (end - start - 1))
+    # 0->1->0 smoothly
+    return float(np.sin(phase) ** 2)
