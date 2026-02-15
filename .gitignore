@@ -11,6 +11,14 @@ __pycache__/
 # DS_Store
 **/.DS_Store
 
+# Generated runs
+runs/
+runs_live/
+trained_detectors/
+trained_detectors_streaming/
+trained_detectors_streaming_percent/
+
+
 # Distribution / packaging
 .Python
 build/
