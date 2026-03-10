@@ -10,6 +10,7 @@ import numpy as np
 from src.pipeline.run_pipeline import PipelineConfig, ScenarioConfig
 from src.pipeline.streaming import run_streaming_pipeline
 from src.control.opf_controller import OPFController
+from src.control.apply_control import ensure_gen_limits
 from src.pipeline.simulation import build_dc_measurement_model
 from src.pipeline.attack_targets import choose_attack_buses_ieee9
 
@@ -48,8 +49,8 @@ def parse_args():
     parser.add_argument("--cooldown", type=int, default=DEFAULT_RANDOM_COOLDOWN)
     parser.add_argument("--no_attack_before", type=int, default=DEFAULT_RANDOM_NO_ATTACK_BEFORE)
 
-    parser.add_argument("--representation", choices=["residuals", "innovations"], default="innovations")
-    parser.add_argument("--innovation_alpha", type=float, default=0.3)
+    parser.add_argument("--representation", choices=["residuals", "innovations", "state_derivative", "state"], default="innovations")
+    parser.add_argument("--innovation_alpha", type=float, default=0.7)
     parser.add_argument("--window_size", type=int, default=5)
 
     parser.add_argument("--out_root", type=str, default="runs_live")
@@ -59,6 +60,13 @@ def parse_args():
         "--detector_type",
         choices=["isolation_forest", "ocsvm", "lof", "none"],
         default="ocsvm",
+    )
+    
+    parser.add_argument(
+        "--detector_dir",
+        type=str,
+        default="trained_detectors_streaming",
+        help="Directory containing trained detector models",
     )
 
     parser.add_argument("--log_features", action="store_true")
@@ -93,7 +101,15 @@ def parse_args():
     parser.add_argument("--enable_mitigation", action="store_true")
     parser.add_argument("--mitigation_mode", type=str, default="freeze", choices=["freeze"])
     # parser.add_argument("--calibration_steps", type=int, default=None)
+    parser.add_argument("--enable_recovery", action="store_true")
 
+    parser.add_argument(
+    "--attack_envelope",
+    type=str,
+    default="raised_cosine",
+    choices=["raised_cosine", "none"],
+    help="Envelope type for stealth FDIA",
+    )
 
     return parser.parse_args()
 
@@ -120,39 +136,50 @@ def main():
     net = build_ieee9_network()
     
     pp.runpp(net, algorithm="nr", init="dc", calculate_voltage_angles=True)
-
-    # if args.enable_control:
-    #     # Ramp limits in MW per step for each generator index in net.gen
-    #     ramp_limits = {int(i): 10.0 for i in net.gen.index}
-    #     controller = OPFController(ramp_limits=ramp_limits)
-    #     print(f"[LIVE] Control enabled (ramp_limits={ramp_limits})")
     
+    # if args.enable_control:
+    #     ramp_limits = {int(i): 10.0 for i in net.gen.index}
+
+    #     control_bus = args.attack_buses[0] if args.attack_buses else None
+
+    #     controller = OPFController(
+    #         ramp_limits=ramp_limits,
+    #         attack_bus=control_bus,
+    #         gain=20.0,
+    #     )
+
+    #     print(
+    #         f"[LIVE] Control enabled (ramp_limits={ramp_limits}, "
+    #         f"attack_buses={args.attack_buses}, gain=20.0)"
+    #     )
+
     if args.enable_control:
         ramp_limits = {int(i): 10.0 for i in net.gen.index}
+
+        # IMPORTANT: create realistic min/max bounds if missing
+        ensure_gen_limits(net, default_headroom_mw=50.0)
 
         control_bus = args.attack_buses[0] if args.attack_buses else None
 
         controller = OPFController(
             ramp_limits=ramp_limits,
             attack_bus=control_bus,
-            gain=20.0,
+            gain=10.0,
+            signal_clip=0.5,   # stops insane spikes
         )
 
         print(
             f"[LIVE] Control enabled (ramp_limits={ramp_limits}, "
-            f"attack_buses={args.attack_buses}, gain=20.0)"
+            f"attack_buses={args.attack_buses}, gain={controller.gain})"
         )
+
+
     # ---- Load streaming-trained detector ----
     if args.detector_type != "none":
-        # detector_path = {
-        #     "isolation_forest": f"trained_detectors_streaming/iforest_ieee9_W{args.window_size}.pkl",
-        #     "ocsvm": f"trained_detectors_streaming/ocsvm_ieee9_W{args.window_size}.pkl",
-        #     "lof": f"trained_detectors_streaming/lof_ieee9_W{args.window_size}.pkl",
-        # }[args.detector_type]
         detector_path = {
-            "isolation_forest": f"trained_detectors_streaming/iforest_ieee9_W{args.window_size}_{args.representation}.pkl",
-            "ocsvm": f"trained_detectors_streaming/ocsvm_ieee9_W{args.window_size}_{args.representation}.pkl",
-            "lof": f"trained_detectors_streaming/lof_ieee9_W{args.window_size}_{args.representation}.pkl",
+            "isolation_forest": f"{args.detector_dir}/iforest_ieee9_W{args.window_size}_{args.representation}.pkl",
+            "ocsvm": f"{args.detector_dir}/ocsvm_ieee9_W{args.window_size}_{args.representation}.pkl",
+            "lof": f"{args.detector_dir}/lof_ieee9_W{args.window_size}_{args.representation}.pkl",
         }[args.detector_type]
 
 
@@ -165,79 +192,24 @@ def main():
 
     if detector is not None:
         if args.scaler_path is None:
-            raise RuntimeError("Streaming detectors REQUIRE a scaler. Pass --scaler_path")
+            args.scaler_path = (
+                f"{args.detector_dir}/scaler_ieee9_W{args.window_size}_{args.representation}.pkl"
+            )
+
         with open(args.scaler_path, "rb") as f:
             scaler = pickle.load(f)
-        print(f"[LIVE] Loaded scaler: {args.scaler_path}")
+
 
     # ---------------- ATTACK BUS SELECTION (STEALTH ONLY) ----------------
-    attacked_indices = None  # default: no targeted subset (=> attack all in step_streaming)
     if args.scenario == "stealth":
 
-        # ---- Choose buses ----
         if args.attack_buses is not None:
             attack_buses = [int(b) for b in args.attack_buses]
         else:
-            # fallback to informed attacker logic
             targets = choose_attack_buses_ieee9(net)
             attack_buses = [targets["central_bus"]]
 
-        # ---- Safety checks ----
-        slack_bus = 0
-        for b in attack_buses:
-            if b < 0 or b >= len(net.bus):
-                raise ValueError(f"attack_bus {b} out of range")
-            if b == slack_bus:
-                raise ValueError("Cannot attack slack bus (no state variable).")
-
-        # ---- Build attacked measurement indices for ALL buses ----
-        H_tmp, _, _, _ = build_dc_measurement_model(net)
-
-        attacked_rows = []
-
-        for bus in attack_buses:
-            state_idx = bus - 1  # slack removed
-            rows = np.where(np.abs(H_tmp[:, state_idx]) > 1e-6)[0]
-            attacked_rows.extend(rows.tolist())
-
-        attacked_indices = np.unique(attacked_rows).astype(int)
-
-        print(
-            f"[LIVE] Stealth attacker targeting buses {attack_buses} "
-            f"({len(attacked_indices)} total measurement indices)"
-        )
-
-    # if args.scenario == "stealth":
-    #     # Pick the bus (explicit CLI override OR informed attacker)
-    #     if args.attack_bus is not None:
-    #         attack_bus = int(args.attack_bus)
-    #     else:
-    #         targets = choose_attack_buses_ieee9(net)
-    #         attack_bus = targets["central_bus"]
-
-    #     # ---- Safety checks ----
-    #     if attack_bus < 0 or attack_bus >= len(net.bus):
-    #         raise ValueError(f"attack_bus must be in [0, {len(net.bus)-1}] for IEEE-9")
-
-    #     slack_bus = 0
-    #     if attack_bus == slack_bus:
-    #         raise ValueError("Cannot attack slack bus (no state variable).")
-
-    #     # ---- Build attacked measurement indices for THIS bus ----
-    #     H_tmp, _, _, _ = build_dc_measurement_model(net)
-
-    #     state_idx = attack_bus - 1  # slack removed
-    #     rows = np.where(np.abs(H_tmp[:, state_idx]) > 1e-6)[0]
-
-    #     if len(rows) == 0:
-    #         raise RuntimeError(f"No valid measurement indices for bus {attack_bus}")
-
-    #     attacked_indices = rows.astype(int)
-
-    #     print(
-    #         f"[LIVE] Stealth attacker targeting bus {attack_bus} "
-    #         f"({len(attacked_indices)} measurement indices)"
-    #     )
+        print(f"[LIVE] Stealth attacker targeting buses {attack_buses}")
 
 
 
@@ -253,7 +225,8 @@ def main():
         end=args.attack_end,
         episodes=None,
         episode_seed=None,
-        attacked_indices=attacked_indices,
+        # attacked_indices=attacked_indices,
+        attack_buses=attack_buses if args.scenario == "stealth" else None,
 
     )
 
@@ -278,12 +251,16 @@ def main():
         controller=controller, 
         control_on_alarm=args.control_on_alarm,
         attack_strength=args.attack_strength,
+        attack_envelope=args.attack_envelope,
         enable_mitigation=args.enable_mitigation,
         mitigation_mode=args.mitigation_mode,
         # calibration_steps=args.calibration_steps,
+        enable_recovery=args.enable_recovery,
     )
 
     print(f"[LIVE DONE] wrote: {run_dir}")
+    # print(net.gen)
+    # print(net.ext_grid)
 
 
 if __name__ == "__main__":

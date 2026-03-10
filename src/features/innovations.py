@@ -27,5 +27,5 @@ def compute_innovations(Z: np.ndarray, alpha: float = 0.3) -> np.ndarray:
     for t in range (1, T):
         Z_hat[t] = alpha * Z[t-1] + (1.0 - alpha) * Z_hat[t-1]
         E[t] = Z[t] - Z_hat[t]
-    
+
     return E

@@ -15,7 +15,7 @@ from pathlib import Path
 from src.pipeline.simulation import build_dc_measurement_model, simulate_measurements
 from src.pipeline.state_estimation import wls_estimate
 from src.pipeline.attack_schedule import generate_random_attack
-from src.pipeline.attacks import stealth_FDIA, standard_FDIA, random_attack
+from src.pipeline.attacks import stealth_FDIA, standard_FDIA, random_attack, make_bus_targeted_c
 
 from src.pipeline.run_pipeline import PipelineConfig, ScenarioConfig
 
@@ -23,6 +23,7 @@ from src.control.opf_controller import OPFController
 from src.control.apply_control import apply_control
 
 from src.pipeline.attacks import raised_cosine_envelope
+
 
 
 
@@ -70,20 +71,47 @@ class EpisodeSchedule:
 
         self.horizon = 0
         self.extend_by = int(extend_by)
+        
+        # Internal pointer for incremental generation
+        self._t_cursor = 0
+
         self._extend(initial_horizon)
 
+    @property
+    def episodes(self) -> List[Episode]:
+        return list(self._episodes)
+
     def _extend(self, new_horizon: int) -> None:
-        episodes = generate_random_attack(
-            T=new_horizon,
-            rng=self._rng,          
-            p_start=self.p_start,
-            duration_min=self.duration_min,
-            duration_max=self.duration_max,
-            cooldown=self.cooldown,
-            no_attack_before=self.no_attack_before,
-        )
-        self._episodes = episodes
-        self.horizon = new_horizon
+        """
+        Extend schedule to cover up to new_horizon (exclusive) without changing existing episodes.
+        """
+        if new_horizon <= self.horizon:
+            return
+
+        t = self._t_cursor
+
+        # Ensure we don't start attacks before no_attack_before
+        if t < self.no_attack_before:
+            t = self.no_attack_before
+
+        # Continue generating episodes forward in time
+        while t < new_horizon:
+            # Decide whether to start an attack at this timestep
+            if self._rng.random() < self.p_start:
+                dur = int(self._rng.integers(self.duration_min, self.duration_max + 1))
+                start = t
+                end = min(t + dur, new_horizon)
+
+                # Record episode
+                self._episodes.append({"start": int(start), "end": int(end)})
+
+                # Jump forward past this episode + cooldown
+                t = end + self.cooldown
+            else:
+                t += 1
+
+        self.horizon = int(new_horizon)
+        self._t_cursor = int(t)
 
     def ensure_coverage(self, t: int) -> None:
         # Extend schedule so that timestep t is within [0, horizon].
@@ -106,7 +134,7 @@ class InnovationStream:
         self._z_prev: Optional[np.ndarray] = None
 
     def step(self, z_t: np.ndarray) -> np.ndarray:
-        z_t = np.asarray(z_t, dtype=float)
+        z_t = np.asarray(z_t, dtype=float).reshape(-1)
 
         if self._z_hat_prev is None:
             self._z_hat_prev = z_t.copy()
@@ -124,7 +152,7 @@ class OnlineWindowDetector:
     """
     Keeps a rolling window of per-timestep feature vectors and emits alarm/score.
 
-    This is predict-only: training remains offline exactly as in your static pipeline.
+    This is predict-only: training is offline.
     """
     def __init__(self, detector: Any, window_size: int, feature_dim: int, scaler: Any = None):
         if not hasattr(detector, "predict"):
@@ -168,9 +196,10 @@ def step_streaming(
     rng_meas: np.random.Generator,
     rng_attack: np.random.Generator,
     attack_active: bool,
-    active_ep: Optional[Dict[str, int]],
+    active_ep: Optional[Episode],
     attack_strength: float,
     c_direction: Optional[np.ndarray],
+    attack_envelope: str,
 ) -> Dict[str, Any]:
     """
     One timestep:
@@ -178,11 +207,9 @@ def step_streaming(
       - run PF
       - build H,x_true
       - simulate clean measurement z_clean
-      - z_attacked
       - apply attack -> z_attacked
-      - run WLS on attacked z
-      - SE (clean) and SE (attacked)
-      - compute residual norm for both
+      - run WLS on clean and attacked z
+      - compute residual vectors + norms
     """
 
     # 1) Load perturbation (same idea as run_time_series.py)
@@ -216,8 +243,9 @@ def step_streaming(
     # 5) Attack layer
     z_att = z_clean.copy()
 
-    if attack_active and scenario.attack_type == "stealth" and scenario.attacked_indices is None:
-        raise ValueError("Stealth FDIA requires explicit attacked_indices")
+    # # Determine attacked indices
+    # if attack_active and scenario.attack_type == "stealth" and scenario.attacked_indices is None:
+    #     raise ValueError("Stealth FDIA requires explicit attacked_indices")
 
     attacked_indices = (
         np.arange(len(z_clean))
@@ -229,8 +257,8 @@ def step_streaming(
     # # --- compute envelope ONCE (correct for random schedules) ---
     attack_env = 0.0
     max_delta = 0.0
-    if scenario.attack_type == "stealth" and active_ep is not None:
-        attack_env = float(raised_cosine_envelope(t, active_ep["start"], active_ep["end"]))
+    # if scenario.attack_type == "stealth" and active_ep is not None:
+    #     attack_env = float(raised_cosine_envelope(t, active_ep["start"], active_ep["end"]))
 
 
     # Apply attack
@@ -246,31 +274,81 @@ def step_streaming(
             if active_ep is None:
                 raise RuntimeError("attack_active=True but active_ep is None")
 
-            # Generate direction ONCE per episode
+            # Generate c_direction once per episode
             if c_direction is None:
-                n = H.shape[1]
-                c_direction = rng_attack.standard_normal(n)
-                c_direction = c_direction / np.linalg.norm(c_direction)
+                c_direction = make_bus_targeted_c(
+                    n_state=H.shape[1],
+                    attack_buses=scenario.attack_buses,
+                    slack_bus=0,
+                    rng=rng_attack,
+                )
+            assert H.shape[0] == len(z_clean)
+            assert H.shape[1] == len(c_direction)
 
-            attack_env = float(
-                raised_cosine_envelope(t, active_ep["start"], active_ep["end"])
-            )
 
-            percent = float(attack_strength)
+            # attack_env = float(
+            #     raised_cosine_envelope(t, active_ep["start"], active_ep["end"])
+            # )
 
-            a = stealth_FDIA(
+            # percent = float(attack_strength) * attack_env
+            if attack_envelope == "raised_cosine":
+                attack_env = float(
+                    raised_cosine_envelope(t, active_ep["start"], active_ep["end"])
+                )
+            elif attack_envelope == "none":
+                attack_env = 1.0 if (active_ep["start"] <= t < active_ep["end"]) else 0.0
+            else:
+                raise ValueError("Invalid attack_envelope")
+
+            percent = float(attack_strength) * attack_env
+
+            z_att, a = stealth_FDIA(
                 H=H,
                 z_clean=z_clean,
-                attacked_indices=attacked_indices,
                 percent=percent,
                 c_direction=c_direction,
             )
 
-            # z_att = z_att + attack_env * a
-            z_att = z_att + a
+            max_delta = float(np.max(np.abs(a)))
+        debug_attack = None
+        if scenario.attack_type == "stealth":
+            debug_attack = {
+                "attack_env": float(attack_env),
+                "percent": float(percent),
+                "max_abs_a": float(np.max(np.abs(a))) if attack_active else 0.0,
+}
 
-        delta_vec = z_att - z_clean
-        max_delta = float(np.max(np.abs(delta_vec)))
+
+        # elif scenario.attack_type == "stealth":
+
+        #     if active_ep is None:
+        #         raise RuntimeError("attack_active=True but active_ep is None")
+
+        #     # Generate direction ONCE per episode
+        #     if c_direction is None:
+        #         n = H.shape[1]
+        #         c_direction = rng_attack.standard_normal(n)
+        #         c_direction = c_direction / np.linalg.norm(c_direction)
+
+        #     attack_env = float(
+        #         raised_cosine_envelope(t, active_ep["start"], active_ep["end"])
+        #     )
+
+        #     percent = float(attack_strength)
+
+        #     a = stealth_FDIA(
+        #         H=H,
+        #         z_clean=z_clean,
+        #         attacked_indices=attacked_indices,
+        #         percent=percent,
+        #         c_direction=c_direction,
+        #     )
+
+        #     z_att = z_att + attack_env * a
+        #     # z_att = z_att + a
+
+        # delta_vec = z_att - z_clean
+        # max_delta = float(np.max(np.abs(delta_vec)))
 
     # 6) State estimation on clean measurements 
     x_hat_clean, _ = wls_estimate(H, z_clean, config.sigma)
@@ -282,6 +360,15 @@ def step_streaming(
     r_att = z_att - H @ x_hat_att
     resid_norm_att = float(np.linalg.norm(r_att))
 
+    if scenario.attack_type == "stealth" and attack_active and (t == scenario.start + 5):
+        xdiff = x_hat_att - x_hat_clean
+        print(f"[DEBUG t={t}] attack_env={debug_attack['attack_env']:.4f} "
+            f"percent={debug_attack['percent']:.6f} "
+            f"max|a|={debug_attack['max_abs_a']:.6e} "
+            f"max|x_diff|={np.max(np.abs(xdiff)):.6e}")
+    # if t % 50 == 0:
+        # print("max |x_true|:", np.max(np.abs(x_true)))
+
     return {
         "t": t,
         "converged": True,
@@ -291,12 +378,18 @@ def step_streaming(
         "z_attacked": z_att,
         "x_hat_clean": x_hat_clean,
         "x_hat_attacked": x_hat_att,
+        # Residual vectors (needed for streaming residual rep consistency)
+        "r_clean": r_clean,
+        "r_attacked": r_att,
+        # residual norms (still useful for plots/logging)
         "residual_norm_clean": resid_norm_clean,
         "residual_norm_attacked": resid_norm_att,
+
         "attack_max_delta": float(max_delta),
         "attack_active": bool(attack_active),
         "attack_envelope": float(attack_env),
         "line_flows": line_flows,
+
         "c_direction": c_direction
 
     }
@@ -310,9 +403,9 @@ def run_streaming_pipeline(
     detector: Optional[Any] = None,
     scaler: Optional[Any] = None,
     window_size: int = 5,
-    representation: str = "innovations",
-    innovation_alpha: float = 0.3,
-    attack_schedule_mode: str = "fixed",
+    representation: str = "innovations", # "innovations" or "residuals"
+    innovation_alpha: float = 0.7,
+    attack_schedule_mode: str = "fixed",  # "fixed" or "random"
     p_start: float = 0.03,
     duration_min: int = 5,
     duration_max: int = 40,
@@ -323,11 +416,11 @@ def run_streaming_pipeline(
     control_on_alarm: bool = False,
     log_features: bool = False,
     attack_strength: float = 1.0,
-    # stealth_max_abs: float = 0.02,
-    # stealth_jitter_std: float = 0.002,
+    attack_envelope: str = "raised_cosine",
     enable_mitigation: bool = False,
     mitigation_mode: str = "freeze",   # only "freeze" supported here
     # calibration_steps: Optional[int] = None # if None -> auto picks safe window
+    enable_recovery: bool = False, # whether to run recovery controller after attack ends
 
 ) -> Path:
     """
@@ -347,9 +440,11 @@ def run_streaming_pipeline(
         raise ValueError("Only 'ieee9' network is supported currently.")
     # if representation != "innovations":
     #     raise ValueError("Streaming currently supports ONLY innovations (aligned with offline pipeline).")
-    if representation not in ["innovations", "residuals"]:
-        raise ValueError("representation must be 'innovations' or 'residuals'")
-
+    if representation not in ["innovations", "residuals", "state_derivative", "state"]:
+        raise ValueError("representation must be 'innovations' or 'residuals' or 'state_derivative' or 'state'")
+    
+    if mitigation_mode != "freeze":
+        raise ValueError("Only mitigation_mode='freeze' is supported")
     
     # RNG discipline:
     # keep load + measurement noise reproducible and independent from attack randomness
@@ -389,28 +484,48 @@ def run_streaming_pipeline(
 
     innov_stream = InnovationStream(alpha=innovation_alpha)
     predictor: Optional[OnlineWindowDetector] = None
+    x_hat_prev: Optional[np.ndarray] = None
 
-    #Mitigation 
-    if mitigation_mode != "freeze":
-        raise ValueError("Only mitigation_mode='freeze' is supported in Option 1")
-
+    # mitigation state
     z_trusted: Optional[np.ndarray] = None
     trusted_frozen: bool = False
 
-    # z_trusted = None              # last trusted measurement
-    # clean_streak = 0
-    # K = 5
+    # ---------------- Recovery State (Alarm-only, Realistic) ----------------
+    gen_p_baseline = (
+        net.gen["p_mw"].to_numpy().copy()
+        if len(net.gen) > 0
+        else None
+    )
+    
+    # recovery_enabled = controller is not None
+    # recovery_enabled = False
+    recovery_enabled = enable_recovery and (controller is not None)
+    recovery_active = False
+    ever_controlled = False
+    emergency_latched = False
+    clean_streak = 0
+
+    cooldown_steps = 10          # alarm-free steps before recovery starts
+    max_recovery_step = 5.0      # MW per timestep
+    recovery_tol = 1e-2          # stop threshold
+
     # if controller is not None:
-    #     controller = OPFController(ramp_limits={0: 10.0, 1: 10.0, 2: 10.0})
-    if controller is not None:
-        pass
+    #     pass
+    
     
     active_ep = None
-    current_attack_direction = None
-    current_episode_id = None
+    current_attack_direction: Optional[np.ndarray] = None
+    current_episode_id: Optional[Tuple[int, int]] = None
+    episode_control_used = False
+    calib_q = 0.99
+    calib_scores: List[float] = []
+    calibrated = False
+    calibrated_threshold: Optional[float] = None
 
+    calibration_end_t = int(scenario.start) if attack_schedule_mode == "fixed" else int(no_attack_before)
 
     t = 0
+    prev_attack_active = False
     try:
         while True:
             if attack_schedule_mode == "fixed":
@@ -421,6 +536,15 @@ def run_streaming_pipeline(
                 assert schedule is not None
                 attack_active, active_ep = schedule.is_active(t)
                 safe_clean = t < no_attack_before
+            
+            # Reset clean streak when a new attack begins
+            if attack_active and not prev_attack_active:
+                clean_streak = 0
+                episode_control_used = False
+
+
+            prev_attack_active = attack_active
+             
             if scenario.attack_type == "stealth":
                 if attack_active:
                     ep_id = (active_ep["start"], active_ep["end"])
@@ -436,22 +560,6 @@ def run_streaming_pipeline(
             else:
                 c_dir = None
 
-            # # Determine guaranteed-clean region
-            # if attack_schedule_mode == "fixed":
-            #     safe_clean = t < scenario.start
-            # else:
-            #     safe_clean = t < no_attack_before
-            
-                # Decide a guaranteed-clean calibration window
-            # - fixed schedule: safe until scenario.start
-            # - random schedule: safe until no_attack_before (because EpisodeSchedule enforces it)
-            # if calibration_end is None:
-            #     if attack_schedule_mode == "fixed":
-            #         calibration_end = int(scenario.start)
-            #     else:
-            #         calibration_end = int(no_attack_before)
-            # Generate direction if needed
-
             step = step_streaming(
                 net,
                 t=t,
@@ -465,9 +573,9 @@ def run_streaming_pipeline(
                 attack_active=attack_active,
                 active_ep=active_ep,
                 attack_strength=attack_strength,
-                # stealth_max_abs=stealth_max_abs,
-                # stealth_jitter_std=stealth_jitter_std,
+                attack_envelope=attack_envelope,
                 c_direction=c_dir,
+                
             )
 
             if not step["converged"]:
@@ -515,17 +623,25 @@ def run_streaming_pipeline(
             })
 
             alarm = False
-            score = None
+            score: Optional[float] = None
+            z_feature = step["z_attacked"]
 
             if detector is not None or log_features:
 
+
                 if representation == "innovations":
-                    feature_t = innov_stream.step(step["z_attacked"])
+                    feature_t = innov_stream.step(z_feature)
 
-                elif representation == "residuals":
-                    # EXACT MATCH WITH STATIC PIPELINE
+                elif representation == "residuals":                
                     feature_t = np.array([step["residual_norm_attacked"]])
+                    # feature_t = step["r_attacked"]
+                    # feature_t = np.abs(step["r_attacked"]) 
 
+                elif representation == "state":
+
+                    feature_t = step["x_hat_attacked"].reshape(-1)
+
+                   
                 else:
                     raise RuntimeError("Invalid representation")
 
@@ -533,17 +649,44 @@ def run_streaming_pipeline(
                     feature_writer.write({"t": t, "features": feature_t.tolist()})
 
                 if detector is not None:
-
                     if predictor is None:
                         predictor = OnlineWindowDetector(
                             detector=detector,
                             window_size=window_size,
-                            feature_dim=feature_t.shape[0],
+                            feature_dim=int(feature_t.shape[0]),
                             scaler=scaler,
                         )
 
-                    alarm, score_val = predictor.update(feature_t)
+                    model_alarm, score_val = predictor.update(feature_t)
                     score = None if np.isnan(score_val) else float(score_val)
+
+                    # CALIBRATION LOGIC
+                    # 1) While in guaranteed-clean region, collect scores (once we have valid score).
+                    if (not calibrated) and safe_clean and (score is not None):
+                        calib_scores.append(score)
+
+                    # 2) When we reach the end of guaranteed-clean region, freeze calibrated threshold once.
+                    #    We do this the FIRST timestep that is NOT safe_clean.
+                    if (not calibrated) and (not safe_clean):
+                        if len(calib_scores) >= 20:
+                            calibrated_threshold = float(np.quantile(np.asarray(calib_scores), calib_q))
+                            
+                        else:
+                            # Fallback if not enough calibration scores (shouldn't happen unless tiny runs)
+                            calibrated_threshold = None
+                        calibrated = True
+
+                    # 3) Decide alarm:
+                    #    - before calibration is frozen: force alarm False (prevents huge early FPR)
+                    #    - after calibration: compare score to calibrated threshold
+                    if not calibrated:
+                        alarm = False
+                    else:
+                        if calibrated_threshold is None or score is None:
+                            # fallback: use detector’s own alarm if calibration failed
+                            alarm = bool(model_alarm)
+                        else:
+                            alarm = bool(score >= calibrated_threshold)
 
             # Mitigation Application
             z_used = step["z_attacked"].copy()
@@ -554,34 +697,109 @@ def run_streaming_pipeline(
                 z_used = z_trusted.copy()
                 z_used_source = "trusted_frozen"
                 mitigation_applied = True
-
+            
+            # Estimate using the measurement that actually drives control/metrics
             x_hat_used, _ = wls_estimate(step["H"], z_used, config.sigma)
             r_used = z_used - step["H"] @ x_hat_used
             resid_norm_used = float(np.linalg.norm(r_used))
 
             
-        # Closed-loop controller hook
+        # # Closed-loop controller hook
+        #     u_t: Optional[Dict[str, Any]] = None
+        #     applied_control = False
+        #     control_reason: Optional[str] = None
+        #     line_flows_post = None
+        #     gen_p_post = None
+        #     if controller is not None:
+        #         # Decide whether to apply control this step
+        #         if control_on_alarm:
+        #             should_control = alarm
+        #             control_reason = "alarm_triggered" if alarm else "no_alarm"
+        #         else:
+        #             should_control = True
+        #             control_reason = "always_control"
+        #         # line_flows_post = None
+        #         # gen_p_post = None
+
+        #         if should_control:
+        #             # x_hat_used, _ = wls_estimate(step["H"], z_used, config.sigma)
+        #             u_t = controller.compute_control(
+        #                 x_hat=x_hat_used,
+        #                 # x_hat=step["x_hat_attacked"],
+        #                 net=net,
+        #                 t=t,
+        #             )
+
+        #             apply_control(
+        #                 net,
+        #                 u_t,
+        #                 ramp_limits=getattr(controller, "ramp_limits", None),
+        #             )
+        #             applied_control = True
+
+        #             # RE-RUN PHYSICS AFTER CONTROL
+        #             try:
+        #                 pp.runpp(net, algorithm="nr", init="dc", calculate_voltage_angles=True)
+
+        #                 line_flows_post = net.res_line.p_from_mw.to_numpy().tolist()
+        #                 gen_p_post = (
+        #                     net.gen["p_mw"].to_numpy().tolist()
+        #                     if len(net.gen) > 0
+        #                     else None
+        #                 )
+
+        #             except Exception as e:
+        #                 # keep post values None, but DO NOT crash the run
+        #                 applied_control = True  # attempted
+        #                 line_flows_post = None
+        #                 gen_p_post = None
+        #                 # optional: log error string if you want (not required)
+        #                 # control_reason = f"{control_reason}|pf_fail"
+                        
+        #                 # If PF fails, keep post values None
+        #                 # line_flows_post = None
+        #                 # gen_p_post = None
+        #     # post_pf_converged = True
+
+        # ---------------- Closed-loop controller + recovery ----------------
             u_t: Optional[Dict[str, Any]] = None
             applied_control = False
             control_reason: Optional[str] = None
             line_flows_post = None
             gen_p_post = None
-            if controller is not None:
-                # Decide whether to apply control this step
-                if control_on_alarm:
-                    should_control = alarm
-                    control_reason = "alarm_triggered" if alarm else "no_alarm"
-                else:
-                    should_control = True
-                    control_reason = "always_control"
-                # line_flows_post = None
-                # gen_p_post = None
 
-                if should_control:
-                    # x_hat_used, _ = wls_estimate(step["H"], z_used, config.sigma)
+            if controller is not None:
+
+                # ---------------- EMERGENCY CONTROL ----------------
+                # if control_on_alarm and alarm:
+
+                #     clean_streak = 0
+                #     recovery_active = False
+
+                #     u_t = controller.compute_control(
+                #         x_hat=x_hat_used,
+                #         net=net,
+                #         t=t,
+                #     )
+
+                #     apply_control(
+                #         net,
+                #         u_t,
+                #         ramp_limits=getattr(controller, "ramp_limits", None),
+                #     )
+
+                #     applied_control = True
+                #     ever_controlled = True
+                #     control_reason = "alarm_triggered"
+                
+                #Update for state representation
+                if control_on_alarm and alarm and not emergency_latched and not episode_control_used:
+
+                    clean_streak = 0
+                    recovery_active = False
+
                     u_t = controller.compute_control(
                         x_hat=x_hat_used,
-                        # x_hat=step["x_hat_attacked"],
                         net=net,
                         t=t,
                     )
@@ -591,46 +809,107 @@ def run_streaming_pipeline(
                         u_t,
                         ramp_limits=getattr(controller, "ramp_limits", None),
                     )
-                    applied_control = True
 
-                    # RE-RUN PHYSICS AFTER CONTROL
+                    emergency_latched = True
+                    ever_controlled = True
+                    episode_control_used = True
+                    control_reason = "alarm_triggered_once"
+
                     try:
                         pp.runpp(net, algorithm="nr", init="dc", calculate_voltage_angles=True)
-
                         line_flows_post = net.res_line.p_from_mw.to_numpy().tolist()
-                        gen_p_post = (
-                            net.gen["p_mw"].to_numpy().tolist()
-                            if len(net.gen) > 0
-                            else None
-                        )
-
+                        gen_p_post = net.gen["p_mw"].to_numpy().tolist()
                     except Exception:
-                        # If PF fails, keep post values None
                         line_flows_post = None
                         gen_p_post = None
-            post_pf_converged = True
+
+                # ---------------- RECOVERY ----------------
+                else:
+
+                    if recovery_enabled:
+
+                        #  Track clean streak from detector
+                        if not alarm:
+                            clean_streak += 1
+                        else:
+                            clean_streak = 0
+                            recovery_active = False
+
+                        #  Only evaluate recovery if we have baseline
+                        if gen_p_baseline is not None:
+
+                            gen_p_current = net.gen["p_mw"].to_numpy(dtype=float)
+
+                            # Check if system is still off nominal
+                            off_nominal_tol = 0.05
+                            off_nominal = np.max(np.abs(gen_p_current - gen_p_baseline)) > off_nominal_tol
+
+                            # Residual must be small (system looks physically consistent)
+                            small_threshold = 0.05  # adjust based on clean residual scale
+                            system_clean = resid_norm_used < small_threshold
+
+                            #  Trigger recovery
+                            # if (
+                            #     ever_controlled
+                            #     and clean_streak >= cooldown_steps
+                            #     and system_clean
+                            #     and off_nominal
+                            # ):
+                            if (
+                                ever_controlled
+                                and clean_streak >= cooldown_steps
+                                and off_nominal
+                            ):
+                                recovery_active = True
+
+                        #  Perform gradual ramp back
+                        if recovery_active and gen_p_baseline is not None:
+
+                            gen_p_current = net.gen["p_mw"].to_numpy(dtype=float)
+
+                            delta = gen_p_baseline - gen_p_current
+
+                            # Limit ramp step
+                            step_delta = np.clip(delta, -max_recovery_step, max_recovery_step)
+
+                            gen_p_next = gen_p_current + step_delta
+
+                            u_rec = {"gen_p": gen_p_next}
+
+                            apply_control(
+                                net,
+                                u_rec,
+                                ramp_limits=getattr(controller, "ramp_limits", None),
+                            )
+
+                            applied_control = True
+                            control_reason = "recovery_ramp"
+
+                            try:
+                                pp.runpp(net, algorithm="nr", init="dc", calculate_voltage_angles=True)
+                                line_flows_post = net.res_line.p_from_mw.to_numpy().tolist()
+                                gen_p_post = net.gen["p_mw"].to_numpy().tolist()
+                            except Exception:
+                                line_flows_post = None
+                                gen_p_post = None
+
+                            #  Stop recovery once baseline reached
+                            if np.max(np.abs(gen_p_next - gen_p_baseline)) < recovery_tol:
+                                recovery_active = False
+                                emergency_latched = False
+
 
             est_w.write(
                 {
                     "t": t,
-
                     # Estimates
                     "x_hat_attacked": step["x_hat_attacked"].tolist(),
                     "x_hat_used": x_hat_used.tolist(),
                     "residual_norm_attacked": float(step["residual_norm_attacked"]),
-
-
+                    "residual_norm_used": float(resid_norm_used),
                     # Detection
                     "alarm": bool(alarm),
                     "score": score,
-                    
-
-                    # # Mitigation
-                    # "mitigation_applied": bool(mitigation_applied),
-                    # # "trusted_age": int(trusted_age),
-                    # "z_used_source": "trusted" if mitigation_applied else "attacked",
-                    # "clean_streak": int(clean_streak),
-
                     # Mitigation
                     "mitigation_enabled": bool(enable_mitigation),
                     "mitigation_applied": bool(mitigation_applied),
@@ -638,27 +917,24 @@ def run_streaming_pipeline(
                     "trusted_frozen": bool(trusted_frozen),
                     # "calibration_end": int(calibration_end),
                     "trusted_initialized": bool(z_trusted is not None),
-
                     # Control
                     "control_applied": bool(applied_control),
                     "control_reason": control_reason,
+                    "recovery_active": bool(recovery_active),
+                    "clean_streak": int(clean_streak),
                     "u_t": (
                         {k: (v.tolist() if isinstance(v, np.ndarray) else v) for k, v in u_t.items()}
                         if u_t is not None
                         else None
                     ),
-                    # "gen_p_mw": gen_p_mw,
                     "gen_p_pre": gen_p_pre,
                     "line_flows_pre": line_flows_pre,
-
                     "gen_p_post": gen_p_post,
                     "line_flows_post": line_flows_post,
-
+                    # Attack Diagnostics
                     "attack_active": bool(attack_active),
                     "attack_max_delta": step.get("attack_max_delta", 0.0),
                     "attack_envelope": step.get("attack_envelope", None),
-                    # # "line_flows": step.get("line_flows", None),
-                    # "post_pf_converged": post_pf_converged,
                     
                 }
             )

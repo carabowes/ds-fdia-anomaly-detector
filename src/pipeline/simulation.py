@@ -21,78 +21,121 @@ def load_test_case(case="case14"):
     return net
 
 def build_dc_measurement_model(net):
-    """
-    Build a DC state estimation model using branch-flow measurements:
 
-        z_k = (theta_i - theta_j) / x_ij
-
-    Returns:
-        H      : measurement matrix (m x n)
-        x_true : true state vector (non-slack angles)
-        z_true : true flow measurements (m,)
-        mask   : boolean mask for non-slack buses
-    """
-    # 1. Identify slack and true angles
-    
     slack_bus = net.ext_grid.bus.values[0]
+
     va_deg = net.res_bus.va_degree.values
     va_rad = np.deg2rad(va_deg)
 
     nb = len(net.bus)
 
-    # Mask of non-slack buses
     mask = np.ones(nb, dtype=bool)
     mask[slack_bus] = False
+
     non_slack_buses = np.where(mask)[0]
     n = len(non_slack_buses)
 
-    # True state vector (angles at non-slack buses)
+    # map bus -> state index
+    bus_to_idx = {bus: i for i, bus in enumerate(non_slack_buses)}
+
     x_true = va_rad[mask]
 
-    #Build measurement matrix H
     rows = []
     z_true_list = []
-
+    line_row_count = 0
+    inj_row_count = 0
+    # -----------------------
+    # Line flow measurements
+    # -----------------------
+# -----------------------
+# Line flow measurements
+# -----------------------
     for _, line in net.line.iterrows():
+
         i = int(line.from_bus)
         j = int(line.to_bus)
 
-        # Determine reactance x
-        if 'x_ohm_per_km' in line.index:
-            x = line.x_ohm_per_km * line.length_km
-        elif 'x_ohm' in line.index:
-            x = line.x_ohm
-        elif 'x_pu' in line.index:
-            x = line.x_pu
-        elif 'x' in line.index:
-            x = line.x
-        else:
-            raise ValueError("Could not determine reactance column.")
+        # convert reactance to per-unit
+        x_ohm = line.x_ohm_per_km * line.length_km
+        base_kv = net.bus.vn_kv.iloc[i]
+        Z_base = (base_kv ** 2) / net.sn_mva
+        x = x_ohm / Z_base
 
         row = np.zeros(n)
 
-        # Only fill entries for non-slack buses
-        if i in non_slack_buses:
-            idx_i = np.where(non_slack_buses == i)[0][0]
-            row[idx_i] =  1.0 / x
+        if i in bus_to_idx:
+            row[bus_to_idx[i]] = 1.0 / x
 
-        if j in non_slack_buses:
-            idx_j = np.where(non_slack_buses == j)[0][0]
-            row[idx_j] = -1.0 / x
+        if j in bus_to_idx:
+            row[bus_to_idx[j]] = -1.0 / x
 
         rows.append(row)
-
-        # True flow
+        line_row_count += 1
         theta_i = va_rad[i]
         theta_j = va_rad[j]
+
         z_true_list.append((theta_i - theta_j) / x)
+
+
+    # -----------------------
+    # Bus injection measurements
+    # -----------------------
+    for bus in non_slack_buses:
+
+        row = np.zeros(n)
+
+        for _, line in net.line.iterrows():
+
+            i = int(line.from_bus)
+            j = int(line.to_bus)
+
+            # convert reactance to per-unit
+            x_ohm = line.x_ohm_per_km * line.length_km
+            base_kv = net.bus.vn_kv.iloc[i]
+            Z_base = (base_kv ** 2) / net.sn_mva
+            x = x_ohm / Z_base
+
+            if i == bus or j == bus:
+
+                other = j if i == bus else i
+
+                row[bus_to_idx[bus]] += 1.0 / x
+
+                if other in bus_to_idx:
+                    row[bus_to_idx[other]] -= 1.0 / x
+
+        rows.append(row)
+        inj_row_count += 1
+
+        theta_i = va_rad[bus]
+
+        P_i = 0.0
+
+        for _, line in net.line.iterrows():
+
+            i = int(line.from_bus)
+            j = int(line.to_bus)
+
+            # convert reactance to per-unit
+            x_ohm = line.x_ohm_per_km * line.length_km
+            base_kv = net.bus.vn_kv.iloc[i]
+            Z_base = (base_kv ** 2) / net.sn_mva
+            x = x_ohm / Z_base
+
+            if i == bus:
+                P_i += (theta_i - va_rad[j]) / x
+            elif j == bus:
+                P_i += (theta_i - va_rad[i]) / x
+
+    z_true_list.append(P_i)
 
     H = np.vstack(rows)
     z_true = np.array(z_true_list)
-
-    # print("H shape =", H.shape)
-    # print("x_true shape =", x_true.shape)
-    # print("z_true shape =", z_true.shape)
+    # print("num lines in net.line:", len(net.line))
+    # print("non_slack_buses:", non_slack_buses)
+    # print("line rows added:", line_row_count)
+    # print("injection rows added:", inj_row_count)
+    # print("total rows added:", len(rows))
 
     return H, x_true, z_true, mask
 
@@ -104,4 +147,8 @@ def simulate_measurements(H, x_true, sigma, rng):
     m = H.shape[0]
     noise = rng.normal(loc=0.0, scale=sigma, size=m)
     z = H @ x_true + noise
+    # print("H shape:", H.shape)
+    # print("max |H|:", np.max(np.abs(H)))
+    # print("min nonzero |H|:", np.min(np.abs(H[np.nonzero(H)])))
+
     return z

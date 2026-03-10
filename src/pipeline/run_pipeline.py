@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from src.pipeline.time_series import run_time_series, inject_fdi_time_series
 from src.pipeline.state_estimation import run_wls_time_series
@@ -27,6 +27,7 @@ class ScenarioConfig:
 
     attack_type: ScenarioType = "standard"
     attacked_indices: Optional[np.ndarray] = None
+    attack_buses: Optional[List[int]] = None
 
     # Legacy fixed window
     start: int = 50
